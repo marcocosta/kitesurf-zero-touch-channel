@@ -1,0 +1,9 @@
+name: workflow-check
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ""Workflow detected on 08/23/2025 10:23:29""
