@@ -1,0 +1,38 @@
+{
+  "title_en": "Kitesurf Cinematic \u2022 {location} \u2022 4K",
+  "title_pt": "Cinem\u00e1tica de Kitesurf \u2022 {location} \u2022 4K",
+  "description_en": "Scenic kitesurf ride across {location}. Wind {wind_knots} kn, tide {tide_state}. CC0/CC-BY credits below.\n\nCredits:\n{credits}\n\nMusic: {music_track}\n\n#kitesurf #brazil #travel #drone",
+  "description_pt": "Passeio c\u00eanico de kitesurf em {location}. Vento {wind_knots} n\u00f3s, mar\u00e9 {tide_state}. Cr\u00e9ditos CC0/CC-BY abaixo.\n\nCr\u00e9ditos:\n{credits}\n\nM\u00fasica: {music_track}\n\n#kitesurf #brasil #viagem #drone",
+  "tags": [
+    "kitesurf",
+    "kiteboarding",
+    "drone",
+    "brazil",
+    "beach",
+    "travel",
+    "cinematic",
+    "4k"
+  ],
+  "chapters": [
+    {
+      "time": "0:00",
+      "title": "Aerial open"
+    },
+    {
+      "time": "0:15",
+      "title": "Shorebreak"
+    },
+    {
+      "time": "0:40",
+      "title": "Downwinder"
+    },
+    {
+      "time": "1:10",
+      "title": "Close-ups"
+    },
+    {
+      "time": "1:30",
+      "title": "Sunset"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+moviepy==1.0.3
+pydub==0.25.1
+requests==2.32.3
+Pillow==10.4.0
+pyyaml==6.0.2
+google-api-python-client==2.141.0
+google-auth==2.34.0
+google-auth-oauthlib==1.2.1

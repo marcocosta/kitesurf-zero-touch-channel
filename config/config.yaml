@@ -1,0 +1,30 @@
+channel:
+  name: "Blue Horizon Kitesurf"
+  tagline: "Scenic wind, waves, and wanderlust."
+  language_primary: "en"
+  language_secondary: "pt-BR"
+  timezone: "America/Los_Angeles"
+  upload_cadence:
+    scenic_compilations: "3 per week"
+    spot_guides: "1 per week"
+    gear_cinematics: "1 per week"
+    relax_lofi: "1 per week"
+branding:
+  colors: { teal: "#0FB5BA", sand: "#E4D2B8", ink: "#0D1B2A", white: "#FFFFFF" }
+  fonts: { heading: "Poppins", body: "Inter" }
+  thumbnail_frame: "templates/thumbnail_frame.svg"
+assets:
+  music_dir: "content/assets/music"
+  broll_dir: "content/assets/broll"
+  font_dir: "content/assets/fonts"
+integrations:
+  pexels_api_key: "oVtdg6mE6NbJNCRxJAQ4OiMGmvVTyndw4jkyXoP6Z63712RCR9XTWQ1q"
+  pixabay_api_key: "51924847-84de9cc90adafd78384c4dca2"
+  youtube:
+    client_secrets_file: "config/client_secret.json"
+    tokens_file: "config/tokens.json"
+rules:
+  license_policy: "Only CC0/CC-BY with attribution in description"
+  safety: "No dangerous stunts; avoid minors; respect local rules"
+  max_video_length_minutes: 6
+  min_clip_resolution: "1920x1080"

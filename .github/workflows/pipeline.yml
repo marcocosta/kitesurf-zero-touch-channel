@@ -1,0 +1,32 @@
+
+name: kitesurf-zero-touch-pipeline
+on:
+  schedule:
+    - cron: "0 14 * * 1-5"  # 07:00 America/Los_Angeles on weekdays
+  workflow_dispatch: {}
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Fetch assets
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+        run: python scripts/fetch_assets.py
+      - name: Generate metadata
+        run: python scripts/generate_metadata.py
+      - name: Assemble video
+        run: python scripts/assemble_video.py
+      - name: Generate thumbnail
+        run: python scripts/generate_thumbnail.py
+      - name: Upload to YouTube
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        run: python scripts/upload_youtube.py
