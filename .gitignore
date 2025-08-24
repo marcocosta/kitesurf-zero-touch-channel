@@ -1,0 +1,5 @@
+content/assets/
+content/uploads/
+config/tokens.json
+config/client_secret.json
+TEMP_MPY*
