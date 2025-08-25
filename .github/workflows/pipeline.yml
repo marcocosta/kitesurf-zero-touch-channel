@@ -1,32 +1,135 @@
-
 name: kitesurf-zero-touch-pipeline
+
 on:
   schedule:
-    - cron: "0 14 * * 1-5"  # 07:00 America/Los_Angeles on weekdays
+    - cron: "0 14 * * 1-5"   # 07:00 America/Los_Angeles on weekdays
   workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUNBUFFERED: "1"   # flush Python prints immediately to the log
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: System deps (ffmpeg + fonts)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+
       - name: Install deps
-        run: pip install -r requirements.txt
-      - name: Fetch assets
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || true
+          # Ensure we have these even if requirements.txt missed them
+          pip install --upgrade moviepy imageio-ffmpeg Pillow PyYAML requests numpy
+
+      - name: Fetch assets (Pexels/Pixabay)
         env:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-        run: python scripts/fetch_assets.py
+        run: |
+          python scripts/fetch_assets.py --per-page 6
+
+      - name: Inventory b-roll (log files)
+        run: |
+          set -e
+          echo "broll root:" && ls -lh content/assets/broll || true
+          LATEST=$(ls -1d content/assets/broll/* 2>/dev/null | sort | tail -n 1)
+          echo "LATEST=$LATEST"
+          if [ -n "$LATEST" ]; then
+            echo "mp4 count:" $(find "$LATEST" -maxdepth 1 -name '*.mp4' | wc -l)
+            find "$LATEST" -maxdepth 1 -name '*.mp4' -printf '%f\n' | head -n 10
+          fi
+
       - name: Generate metadata
         run: python scripts/generate_metadata.py
-      - name: Assemble video
-        run: python scripts/assemble_video.py
-      - name: Generate thumbnail
-        run: python scripts/generate_thumbnail.py
-      - name: Upload to YouTube
+
+      - name: Generate ambient soundtrack
+        run: |
+          python scripts/generate_music.py --duration 65 --bpm 84 --key A --mode minor --no-arp --percussion-level 0.25 --bright 0.35 --mp3
+
+      - name: Assemble 1080p montage (with soundtrack + ducking)
+        run: |
+          python scripts/assemble_video.py \
+            --logger bar \
+            --scan-limit 24 \
+            --max-clips 12 \
+            --target-seconds 60 \
+            --max-height 1080 \
+            --music content/assets/music \
+            --music-volume 0.18 \
+            --music-fade 2.0 \
+            --music-crossfade 1.0 \
+            --duck-native-audio --duck-dB 12 --duck-attack 0.2 --duck-release 0.6
+
+      - name: Extract title from metadata
+        id: meta_title
+        run: |
+          TITLE=$(python - <<'PY'
+          import json
+          with open('content/uploads/metadata_001.json', encoding='utf-8') as f:
+              j = json.load(f)
+          print(j.get('title_en') or j.get('title') or 'Trade Winds On')
+          PY
+          )
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+
+      - name: Generate 1280x720 thumbnail
+        run: |
+          python scripts/generate_thumbnail.py \
+            --size 1280x720 \
+            --title "${{ steps.meta_title.outputs.title }}" \
+            --output content/uploads/thumbnail_001.jpg
+
+      - name: Write client secrets (optional)
+        if: ${{ secrets.GOOGLE_CLIENT_SECRET_JSON != '' }}
         env:
-          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-        run: python scripts/upload_youtube.py
+          GOOGLE_CLIENT_SECRET_JSON: ${{ secrets.GOOGLE_CLIENT_SECRET_JSON }}
+        run: |
+          mkdir -p config
+          printf "%s" "$GOOGLE_CLIENT_SECRET_JSON" > config/client_secret.json
+
+      - name: Write OAuth tokens (optional)
+        if: ${{ secrets.YOUTUBE_TOKENS_JSON != '' }}
+        env:
+          YOUTUBE_TOKENS_JSON: ${{ secrets.YOUTUBE_TOKENS_JSON }}
+        run: |
+          mkdir -p config
+          printf "%s" "$YOUTUBE_TOKENS_JSON" > config/tokens.json
+
+      - name: Upload to YouTube (optional)
+        if: ${{ secrets.GOOGLE_CLIENT_SECRET_JSON != '' && secrets.YOUTUBE_TOKENS_JSON != '' }}
+        run: |
+          python scripts/upload_youtube.py \
+            --video content/uploads/scenic_montage_001.mp4 \
+            --thumbnail content/uploads/thumbnail_001.jpg \
+            --metadata content/uploads/metadata_001.json \
+            --privacy unlisted
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kitesurf-outputs-${{ github.run_id }}
+          path: |
+            content/uploads/scenic_montage_001.mp4
+            content/uploads/thumbnail_001.jpg
+            content/uploads/metadata_001.json
