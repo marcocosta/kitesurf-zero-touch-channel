@@ -70,7 +70,7 @@ jobs:
             COUNT=$(find "$LATEST" -maxdepth 1 -name '*.mp4' | wc -l | tr -d ' ')
             echo "mp4 count: $COUNT"
             find "$LATEST" -maxdepth 1 -name '*.mp4' -printf '%f
-' | head -n 10
+          ' | head -n 10
           fi
           echo "count=$COUNT" >> $GITHUB_OUTPUT
 
