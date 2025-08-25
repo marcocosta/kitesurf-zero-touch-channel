@@ -80,7 +80,7 @@ jobs:
         id: inv
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           echo "broll root:" && ls -lh content/assets/broll || true
           LATEST=$(ls -1d content/assets/broll/* 2>/dev/null | sort | tail -n 1)
           echo "LATEST=$LATEST"
@@ -88,10 +88,10 @@ jobs:
           if [ -n "$LATEST" ]; then
             COUNT=$(find "$LATEST" -maxdepth 1 -name '*.mp4' | wc -l | tr -d ' ')
             echo "mp4 count: $COUNT"
-            find "$LATEST" -maxdepth 1 -name '*.mp4' -printf '%f
-' | head -n 10
+             find "${LATEST}" -maxdepth 1 -type f -name "*.mp4" -print \
+            | sed 's#.*/##' | head -n 10
           fi
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
 
       - name: Fallback — seed synthetic b-roll if none
         if: ${{ steps.inv.outputs.count == '0' }}
