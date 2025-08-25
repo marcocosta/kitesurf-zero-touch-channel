@@ -3,7 +3,6 @@ name: kitesurf-zero-touch-pipeline
 on:
   push:
     branches: [ "main" ]
-    # remove 'paths:' filters to avoid accidental skips; any push runs the workflow
   workflow_dispatch: {}
   schedule:
     - cron: "0 14 * * 1-5"   # 07:00 America/Los_Angeles on weekdays
@@ -20,8 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      PYTHONUNBUFFERED: "1"   # flush prints immediately
-      # Map repo secrets to env once so we can safely reference env.* in step conditions
+      PYTHONUNBUFFERED: "1"
       PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
       GOOGLE_CLIENT_SECRET_JSON: ${{ secrets.GOOGLE_CLIENT_SECRET_JSON }}
@@ -50,7 +48,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt || true
-          # Ensure we have these even if requirements.txt missed them
           pip install --upgrade moviepy imageio-ffmpeg Pillow PyYAML requests numpy
 
       - name: Fetch assets (Pexels/Pixabay)
@@ -58,18 +55,41 @@ jobs:
           PEXELS_API_KEY: ${{ env.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ env.PIXABAY_API_KEY }}
         run: |
-          python scripts/fetch_assets.py --per-page 6
+          python scripts/fetch_assets.py --per-page 6 || true
 
       - name: Inventory b-roll (log files)
+        id: inv
+        shell: bash
         run: |
           set -e
           echo "broll root:" && ls -lh content/assets/broll || true
           LATEST=$(ls -1d content/assets/broll/* 2>/dev/null | sort | tail -n 1)
           echo "LATEST=$LATEST"
+          COUNT=0
           if [ -n "$LATEST" ]; then
-            echo "mp4 count:" $(find "$LATEST" -maxdepth 1 -name '*.mp4' | wc -l)
-            find "$LATEST" -maxdepth 1 -name '*.mp4' -printf '%f\n' | head -n 10
+            COUNT=$(find "$LATEST" -maxdepth 1 -name '*.mp4' | wc -l | tr -d ' ')
+            echo "mp4 count: $COUNT"
+            find "$LATEST" -maxdepth 1 -name '*.mp4' -printf '%f
+' | head -n 10
           fi
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Fallback — seed synthetic b-roll if none
+        if: ${{ steps.inv.outputs.count == '0' }}
+        run: |
+          python - <<'PY'
+          import pathlib, datetime
+          from moviepy.editor import ColorClip
+          d = pathlib.Path('content/assets/broll')/datetime.date.today().isoformat()
+          d.mkdir(parents=True, exist_ok=True)
+          colors = [(30,144,255),(255,180,80),(80,200,160)]
+          for i,col in enumerate(colors,1):
+              p = d/f"synthetic_{i:02d}.mp4"
+              clip = ColorClip(size=(1280,720), color=col, duration=5).set_fps(24)
+              clip.write_videofile(str(p), codec='libx264', audio=False, fps=24, preset='ultrafast', threads=1, logger=None)
+              clip.close()
+          print('seeded:', d)
+          PY
 
       - name: Generate metadata
         run: python scripts/generate_metadata.py
@@ -81,10 +101,10 @@ jobs:
       - name: Assemble 1080p montage (with soundtrack + ducking)
         run: |
           python scripts/assemble_video.py \
-            --logger bar \
-            --scan-limit 24 \
-            --max-clips 12 \
-            --target-seconds 60 \
+            --logger verbose \
+            --scan-limit 16 \
+            --max-clips 10 \
+            --target-seconds 55 \
             --max-height 1080 \
             --music content/assets/music \
             --music-volume 0.18 \
