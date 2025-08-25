@@ -1,9 +1,19 @@
 name: kitesurf-zero-touch-pipeline
 
 on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "scripts/**"
+      - ".github/workflows/pipeline.yml"
+      - "requirements.txt"
+      - "config/**"
+  workflow_dispatch: {}
   schedule:
     - cron: "0 14 * * 1-5"   # 07:00 America/Los_Angeles on weekdays
-  workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
