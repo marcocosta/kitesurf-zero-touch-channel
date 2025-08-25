@@ -29,6 +29,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
+        id: setup_py
         with:
           python-version: '3.11'
 
@@ -44,11 +45,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-dejavu-core
 
-      - name: Install deps
+      - name: Install deps (robust)
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt || true
-          pip install --upgrade moviepy imageio-ffmpeg Pillow PyYAML requests numpy
+          set -eux
+          python -c "import sys; print('Python:', sys.version); print('Exe:', sys.executable)"
+          python -m pip install --upgrade pip setuptools wheel
+          # Project requirements (optional)
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt || true; fi
+          # Ensure runtime deps no matter what requirements.txt has
+          python -m pip install --upgrade moviepy imageio imageio-ffmpeg Pillow numpy requests PyYAML proglog decorator
+          python -m pip show moviepy || true
+
+      - name: Verify MoviePy import (fail early if missing)
+        run: |
+          python - <<'PY'
+          import sys
+          try:
+              import moviepy, imageio_ffmpeg
+              print('MoviePy OK:', getattr(moviepy,'__version__','?'))
+              print('FFmpeg exe:', imageio_ffmpeg.get_ffmpeg_exe())
+          except Exception as e:
+              print('FATAL: MoviePy import failed:', e)
+              sys.exit(2)
+          PY
 
       - name: Fetch assets (Pexels/Pixabay)
         env:
@@ -70,7 +89,7 @@ jobs:
             COUNT=$(find "$LATEST" -maxdepth 1 -name '*.mp4' | wc -l | tr -d ' ')
             echo "mp4 count: $COUNT"
             find "$LATEST" -maxdepth 1 -name '*.mp4' -printf '%f
-          ' | head -n 10
+' | head -n 10
           fi
           echo "count=$COUNT" >> $GITHUB_OUTPUT
 
@@ -100,6 +119,7 @@ jobs:
 
       - name: Assemble 1080p montage (with soundtrack + ducking)
         run: |
+          python -c "import moviepy,sys; print('MoviePy @ assemble:', getattr(moviepy,'__version__','?'), sys.executable)"
           python scripts/assemble_video.py \
             --logger verbose \
             --scan-limit 16 \
