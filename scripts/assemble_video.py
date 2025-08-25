@@ -21,11 +21,10 @@ import os
 import pathlib
 import random
 import sys
-import tempfile
 import time
 from typing import List, Tuple
 
-VERSION = "assemble-video v2025.08.24"
+VERSION = "assemble-video v2025.08.25"
 
 # --- Pillow 10+ compatibility: provide deprecated resample constants for MoviePy ---
 try:
@@ -132,7 +131,7 @@ def list_music_files(music_dir: pathlib.Path) -> List[pathlib.Path]:
     return files
 
 
-def build_soundtrack(duration: float, args) :
+def build_soundtrack(duration: float, args):
     """Return an AudioClip matching duration, or None if no music available.
     Strategy: pick one random file; if longer → random trim; if shorter → loop with crossfades.
     """
@@ -222,7 +221,9 @@ def safe_subclip(path: str, args: argparse.Namespace):
         dur = float(getattr(clip, "duration", 0) or 0)
         if dur < args.min_clip_seconds + 0.5:
             return None
-        start = random.uniform(0, max(0.0, dur - args.max_clip_seconds - 0.1))
+        # choose start/end
+        max_start = max(0.0, dur - args.max_clip_seconds - 0.1)
+        start = random.uniform(0, max_start)
         end = min(dur, start + random.uniform(args.min_clip_seconds, args.max_clip_seconds))
         sub = clip.subclip(start, end)
         if args.max_height and getattr(sub, "h", 0) > args.max_height:
@@ -294,13 +295,6 @@ def main():
     print(VERSION, flush=True)
     print(f"[assemble] Python: {sys.version.splitlines()[0]}", flush=True)
     print(f"[assemble] CWD: {os.getcwd()}", flush=True)
-
-    if args.diagnose:
-        try:
-            import imageio_ffmpeg
-            print(f"[assemble] ffmpeg: {imageio_ffmpeg.get_ffmpeg_exe()}", flush=True)
-        except Exception as e:
-            print(f"[assemble] ffmpeg path detection error: {e}", flush=True)
 
     # Find b-roll directory
     broll_root = pathlib.Path("content/assets/broll")
