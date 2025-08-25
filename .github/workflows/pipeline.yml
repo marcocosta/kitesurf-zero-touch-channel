@@ -3,11 +3,7 @@ name: kitesurf-zero-touch-pipeline
 on:
   push:
     branches: [ "main" ]
-    paths:
-      - "scripts/**"
-      - ".github/workflows/pipeline.yml"
-      - "requirements.txt"
-      - "config/**"
+    # remove 'paths:' filters to avoid accidental skips; any push runs the workflow
   workflow_dispatch: {}
   schedule:
     - cron: "0 14 * * 1-5"   # 07:00 America/Los_Angeles on weekdays
@@ -24,7 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      PYTHONUNBUFFERED: "1"   # flush Python prints immediately to the log
+      PYTHONUNBUFFERED: "1"   # flush prints immediately
+      # Map repo secrets to env once so we can safely reference env.* in step conditions
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+      GOOGLE_CLIENT_SECRET_JSON: ${{ secrets.GOOGLE_CLIENT_SECRET_JSON }}
+      YOUTUBE_TOKENS_JSON: ${{ secrets.YOUTUBE_TOKENS_JSON }}
 
     steps:
       - uses: actions/checkout@v4
@@ -54,8 +55,8 @@ jobs:
 
       - name: Fetch assets (Pexels/Pixabay)
         env:
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          PEXELS_API_KEY: ${{ env.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ env.PIXABAY_API_KEY }}
         run: |
           python scripts/fetch_assets.py --per-page 6
 
@@ -111,23 +112,23 @@ jobs:
             --output content/uploads/thumbnail_001.jpg
 
       - name: Write client secrets (optional)
-        if: ${{ secrets.GOOGLE_CLIENT_SECRET_JSON != '' }}
+        if: ${{ env.GOOGLE_CLIENT_SECRET_JSON != '' }}
         env:
-          GOOGLE_CLIENT_SECRET_JSON: ${{ secrets.GOOGLE_CLIENT_SECRET_JSON }}
+          GOOGLE_CLIENT_SECRET_JSON: ${{ env.GOOGLE_CLIENT_SECRET_JSON }}
         run: |
           mkdir -p config
           printf "%s" "$GOOGLE_CLIENT_SECRET_JSON" > config/client_secret.json
 
       - name: Write OAuth tokens (optional)
-        if: ${{ secrets.YOUTUBE_TOKENS_JSON != '' }}
+        if: ${{ env.YOUTUBE_TOKENS_JSON != '' }}
         env:
-          YOUTUBE_TOKENS_JSON: ${{ secrets.YOUTUBE_TOKENS_JSON }}
+          YOUTUBE_TOKENS_JSON: ${{ env.YOUTUBE_TOKENS_JSON }}
         run: |
           mkdir -p config
           printf "%s" "$YOUTUBE_TOKENS_JSON" > config/tokens.json
 
       - name: Upload to YouTube (optional)
-        if: ${{ secrets.GOOGLE_CLIENT_SECRET_JSON != '' && secrets.YOUTUBE_TOKENS_JSON != '' }}
+        if: ${{ env.GOOGLE_CLIENT_SECRET_JSON != '' && env.YOUTUBE_TOKENS_JSON != '' }}
         run: |
           python scripts/upload_youtube.py \
             --video content/uploads/scenic_montage_001.mp4 \
