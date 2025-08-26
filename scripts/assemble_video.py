@@ -2,12 +2,17 @@
 """
 Scenic montage assembler with soundtrack + ducking
 Compatible with MoviePy v1.x and v2.x (no editor facade)
+
+Key fixes for your case:
+- **Recursive** music search (finds files in subfolders under content/assets/music)
+- Clear logging: prints music folder + how many tracks found + chosen file
+- v1/v2 safety for subclip/resize/logger/effects
 """
 from __future__ import annotations
 import argparse, glob, os, pathlib, random, sys, time
 from typing import List, Tuple
 
-VERSION = "assemble-video v2025.08.25"
+VERSION = "assemble-video v2025.08.26"
 
 # --- Pillow 10+ compatibility: remap deprecated constants so MoviePy v1 code won't crash
 try:
@@ -26,9 +31,7 @@ concatenate_audioclips = CompositeAudioClip = None
 AudioLoop = AudioFadeIn = AudioFadeOut = MultiplyVolume = None
 
 def ensure_moviepy():
-    """
-    Make this file run on MoviePy v2.x (preferred) and v1.x (fallback).
-    """
+    """Make this file run on MoviePy v2.x (preferred) and v1.x (fallback)."""
     global VideoFileClip, AudioFileClip, concatenate_videoclips, ColorClip
     global concatenate_audioclips, CompositeAudioClip
     global AudioLoop, AudioFadeIn, AudioFadeOut, MultiplyVolume
@@ -40,27 +43,21 @@ def ensure_moviepy():
 
     # ---- Preferred: MoviePy v2.x root imports
     try:
-        # Core classes/functions available from root in v2
         from moviepy import (
             VideoFileClip as _V, AudioFileClip as _A, ColorClip as _Col,
             concatenate_videoclips as _CV,
         )
         VideoFileClip, AudioFileClip, ColorClip, concatenate_videoclips = _V, _A, _Col, _CV
-
-        # Audio helpers: root (if exported), otherwise module paths
         try:
             from moviepy import concatenate_audioclips as _CA
         except Exception:
             from moviepy.audio.AudioClip import concatenate_audioclips as _CA
         concatenate_audioclips = _CA
-
         try:
             from moviepy import CompositeAudioClip as _Comp
         except Exception:
             from moviepy.audio.AudioClip import CompositeAudioClip as _Comp
         CompositeAudioClip = _Comp
-
-        # v2 effect classes (used via with_effects)
         try:
             from moviepy.audio.fx.AudioLoop import AudioLoop as _AL
         except Exception:
@@ -74,7 +71,6 @@ def ensure_moviepy():
             from moviepy.audio.fx.MultiplyVolume import MultiplyVolume as _MV
         except Exception:
             _MV = None
-
         AudioLoop, AudioFadeIn, AudioFadeOut, MultiplyVolume = _AL, _AFI, _AFO, _MV
         print("[assemble] MoviePy loaded (v2.x)", flush=True)
         return
@@ -90,7 +86,6 @@ def ensure_moviepy():
         )
         VideoFileClip, AudioFileClip, ColorClip = _V, _A, _Col
         concatenate_videoclips, concatenate_audioclips, CompositeAudioClip = _CV, _CA, _Comp
-        # v1 has function-style fx; we rely on methods like .audio_fadein and .volumex
         AudioLoop = AudioFadeIn = AudioFadeOut = MultiplyVolume = None
         print("[assemble] MoviePy loaded (v1.x editor)", flush=True)
         return
@@ -99,28 +94,6 @@ def ensure_moviepy():
         raise
 
 # ---------- small cross-version helpers ----------
-
-def make_logger(kind: str):
-    """
-    Return a proglog logger object (v2) or None. Works fine on v1 too.
-    kind: 'bar' | 'verbose' | 'none'
-    """
-    if not kind or kind == "none":
-        return None
-    try:
-        # Prefer tqdm-style bar if available
-        from proglog import TqdmProgressBarLogger, ProgressBarLogger
-        if kind == "bar":
-            try:
-                return TqdmProgressBarLogger()
-            except Exception:
-                return ProgressBarLogger()
-        # 'verbose' -> simple progress logger (still shows progress)
-        return ProgressBarLogger()
-    except Exception:
-        # If proglog missing, just disable progress (avoid passing a string to v2)
-        return None
-
 
 def subclip_safe(clip, start, end):
     """v1: .subclip(); v2: .subclipped()"""
@@ -156,27 +129,18 @@ def resize_safe(clip, height: int):
 def fade_audio_safe(clip, fade: float):
     if fade <= 0:
         return clip
-    # v1 methods
     try:
-        return clip.audio_fadein(fade).audio_fadeout(fade)
+        return clip.audio_fadein(fade).audio_fadeout(fade)   # v1
     except Exception:
         pass
-    # v2 effects
     try:
         if AudioFadeIn and AudioFadeOut:
-            return clip.with_effects([AudioFadeIn(fade), AudioFadeOut(fade)])
+            return clip.with_effects([AudioFadeIn(fade), AudioFadeOut(fade)])  # v2
     except Exception:
         pass
     return clip
 
 def apply_volume(clip, factor_or_intervals):
-    """
-    v1: volumex supports numbers and callables; v2: use MultiplyVolume on intervals.
-    factor_or_intervals:
-      - float -> uniform multiplier
-      - list[(start,end,low_factor)] -> apply MultiplyVolume per interval (v2)
-    """
-    # uniform factor (both versions)
     if isinstance(factor_or_intervals, (int, float)):
         try:
             return clip.volumex(float(factor_or_intervals))  # v1
@@ -184,8 +148,6 @@ def apply_volume(clip, factor_or_intervals):
             if MultiplyVolume:
                 return clip.with_effects([MultiplyVolume(float(factor_or_intervals))])  # v2
             return clip
-
-    # intervals (for ducking on v2)
     if isinstance(factor_or_intervals, list) and MultiplyVolume:
         effects = []
         for (s, e, low) in factor_or_intervals:
@@ -194,25 +156,25 @@ def apply_volume(clip, factor_or_intervals):
     return clip
 
 def loop_audio_safe(base, duration: float, crossfade: float):
-    # v2 effect
     try:
         if AudioLoop:
-            return base.with_effects([AudioLoop(duration=duration)])
+            return base.with_effects([AudioLoop(duration=duration)])  # v2
     except Exception:
         pass
-    # manual concat
     pieces = []
     t = 0.0
     while t < duration + 0.1:
         end = min(base.duration, duration - t + max(0.0, crossfade))
         part = subclip_safe(base, 0, end)
         if pieces and crossfade > 0:
-            pieces[-1] = pieces[-1].audio_fadeout(crossfade)
+            try:
+                pieces[-1] = pieces[-1].audio_fadeout(crossfade)
+            except Exception:
+                pass
         pieces.append(part)
         t += (end - (crossfade if crossfade > 0 else 0))
     if concatenate_audioclips:
         return concatenate_audioclips(pieces).subclip(0, duration)
-    # emergency: stack with CompositeAudioClip (no crossfades)
     if CompositeAudioClip:
         acc, t = [], 0.0
         while t < duration + 0.1:
@@ -220,6 +182,21 @@ def loop_audio_safe(base, duration: float, crossfade: float):
             t += max(0.1, base.duration - 0.01)
         return CompositeAudioClip(acc).set_duration(duration)
     return subclip_safe(base, 0, min(base.duration, duration))
+
+def make_logger(kind: str):
+    """Return a proglog logger object (v2) or None. Works on v1, too."""
+    if not kind or kind == "none":
+        return None
+    try:
+        from proglog import TqdmProgressBarLogger, ProgressBarLogger
+        if kind == "bar":
+            try:
+                return TqdmProgressBarLogger()
+            except Exception:
+                return ProgressBarLogger()
+        return ProgressBarLogger()
+    except Exception:
+        return None
 
 # -------------- CLI & utilities --------------
 
@@ -269,11 +246,12 @@ def is_uhd_filename(name: str) -> bool:
     return any(tok in n for tok in ["3840_2160", "4096_", "uhd"])
 
 def list_music_files(music_dir: pathlib.Path) -> List[pathlib.Path]:
+    """Recursively find audio files under music_dir."""
     if not music_dir or not music_dir.exists():
         return []
     files: List[pathlib.Path] = []
-    for pat in ("*.mp3","*.wav","*.m4a","*.flac","*.aac","*.ogg"):
-        files.extend(music_dir.glob(pat))
+    for pat in ("**/*.mp3","**/*.wav","**/*.m4a","**/*.flac","**/*.aac","**/*.ogg"):
+        files.extend(music_dir.rglob(pat))
     return files
 
 # -------------- music / ducking --------------
@@ -281,9 +259,11 @@ def list_music_files(music_dir: pathlib.Path) -> List[pathlib.Path]:
 def build_soundtrack(duration: float, args):
     ensure_moviepy()
     files = list_music_files(args.music_dir)
+    print(f"[assemble] music_dir: {args.music_dir} — found {len(files)} track(s)", flush=True)
     if args.no_music or not files:
         return None
     src = random.choice(files)
+    print(f"[assemble] soundtrack pick: {src}", flush=True)
     try:
         base = AudioFileClip(str(src))
         fade = max(0.0, float(args.music_fade))
@@ -297,8 +277,12 @@ def build_soundtrack(duration: float, args):
         else:
             song = loop_audio_safe(base, duration, xfade)
 
+        song = fade_audio_safe(song, fade)
+        if vol != 1.0:
+            song = apply_volume(song, vol)
+        return song
     except Exception as e:
-        print("[assemble] Music load error:", src.name, "=>", e, flush=True)
+        print("[assemble] Music load error:", os.path.basename(str(src)), "=>", e, flush=True)
         return None
 
 def clip_has_audio_stream(path: str) -> bool:
@@ -318,6 +302,7 @@ def clip_has_audio_stream(path: str) -> bool:
 def _db_to_lin(db: float) -> float:
     return 10 ** (-float(db) / 20.0)
 
+# -------------- assemble --------------
 
 def safe_subclip(path: str, args):
     ensure_moviepy()
@@ -345,6 +330,19 @@ def safe_subclip(path: str, args):
             pass
         return None
 
+def make_logger(kind: str):
+    if not kind or kind == "none":
+        return None
+    try:
+        from proglog import TqdmProgressBarLogger, ProgressBarLogger
+        if kind == "bar":
+            try:
+                return TqdmProgressBarLogger()
+            except Exception:
+                return ProgressBarLogger()
+        return ProgressBarLogger()
+    except Exception:
+        return None
 
 def write_video(selected, args, duck_intervals: List[Tuple[float,float]]):
     ensure_moviepy()
@@ -361,7 +359,6 @@ def write_video(selected, args, duck_intervals: List[Tuple[float,float]]):
         if music_clip is not None:
             if args.duck_native_audio and duck_intervals:
                 low = _db_to_lin(args.duck_dB)
-                # v1: continuous envelope via volumex(lambda t: f(t))
                 try:
                     def env(t: float) -> float:
                         v = 1.0
@@ -371,11 +368,9 @@ def write_video(selected, args, duck_intervals: List[Tuple[float,float]]):
                         return v
                     music_clip = music_clip.volumex(lambda t: env(t))  # v1 path
                 except Exception:
-                    # v2: approximate ducking with MultiplyVolume in each interval
                     triples = [(s, e, float(low)) for (s, e) in duck_intervals]
-                    music_clip = apply_volume(music_clip, triples)
+                    music_clip = apply_volume(music_clip, triples)     # v2 stepped ducking
                     print("[assemble] (v2) ducking applied as stepped intervals", flush=True)
-
             video = set_audio_safe(video, music_clip.set_duration(video.duration))
             print("[assemble] Added soundtrack:", args.music_dir, flush=True)
         else:
@@ -396,7 +391,6 @@ def write_video(selected, args, duck_intervals: List[Tuple[float,float]]):
         ffmpeg_params=["-movflags", "faststart"],
         logger=logger,
     )
-
     print("[assemble] Saved", args.output, flush=True)
 
 # -------------- main --------------
@@ -418,7 +412,6 @@ def main():
     if not mp4s:
         raise SystemExit(f"No mp4 files found in {broll_dir}")
 
-    # Skip UHD unless allowed
     filtered = [p for p in mp4s if (not args.skip_uhd) or (not is_uhd_filename(os.path.basename(p)))]
     if not filtered:
         filtered = mp4s
@@ -434,12 +427,13 @@ def main():
     print(f"[assemble] Scanning up to {scan_total} of {len(filtered)} files in {broll_dir} …", flush=True)
 
     selected, duck_intervals = [], []
-    total = scanned = 0.0
+    total = 0.0
+    scanned = 0
     for path in filtered:
         if scanned >= args.scan_limit: break
         if len(selected) >= args.max_clips or total >= args.target_seconds: break
         scanned += 1
-        print(f"[assemble] [{int(scanned)}/{scan_total}] Probing: {os.path.basename(path)}", flush=True)
+        print(f"[assemble] [{scanned}/{scan_total}] Probing: {os.path.basename(path)}", flush=True)
         sub = safe_subclip(path, args)
         if sub is None: continue
         selected.append(sub)
