@@ -69,6 +69,14 @@ jobs:
               sys.exit(2)
           PY
 
+      - name: Install deps (robust)
+        run: |
+          set -eux
+          python -m pip install --upgrade pip setuptools wheel
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt || true; fi
+          python -m pip install --upgrade moviepy imageio imageio-ffmpeg Pillow numpy requests PyYAML proglog decorator
+          python -m pip install --upgrade google-api-python-client google-auth google-auth-oauthlib
+
       - name: Fetch assets (Pexels/Pixabay)
         env:
           PEXELS_API_KEY: ${{ env.PEXELS_API_KEY }}

@@ -1,345 +1,251 @@
 #!/usr/bin/env python3
 """
-Memory‑safe video assembler for scenic kitesurf montages — **diagnostic + music build**.
+YouTube uploader (OAuth desktop flow, resumable upload) — works locally and in CI.
 
-- Immediate progress prints (even before MoviePy import) via lazy-import and flush=True
-- UHD files skipped by default (use --include-uhd to allow)
-- Scan limiter to avoid opening hundreds of large files
-- 1080p output default, Pillow 10 fix included
-- ✅ NEW: Music soundtrack support with fades and smart looping
+Usage:
+  python scripts/upload_youtube.py \
+    --video content/uploads/scenic_montage_001.mp4 \
+    --thumbnail content/uploads/thumbnail_001.jpg \
+    --metadata content/uploads/metadata_001.json \
+    --privacy unlisted
 
-Music features
-- Drop MP3/WAV/M4A/FLAC files into `content/assets/music/`
-- Picks a random track, trims or **loops with crossfade** to match video length
-- Fade in/out and volume control
+Requires:
+  - Client secrets JSON at config/client_secret.json (or --client-secret path)
+  - Tokens JSON will be stored at config/tokens.json (or --tokens path)
+  - Packages: google-api-python-client, google-auth, google-auth-oauthlib
 
-Examples:
-  python scripts/assemble_video.py --logger bar --scan-limit 24 --target-seconds 60
-  python scripts/assemble_video.py --include-uhd --logger verbose
-  python scripts/assemble_video.py --music content/assets/music --music-volume 0.18 --music-fade 2.0 --music-crossfade 1.0
+In CI, you can inject the JSON contents via env/Secrets and write the files
+before running this script.
 """
 from __future__ import annotations
 import argparse
-import glob
+import json
 import os
 import pathlib
-import random
 import sys
-import tempfile
 import time
-from typing import List
+from typing import Any, Dict, List
 
-VERSION = "assemble-video v2025.08.23-music"
-
-# --- Pillow 10+ compatibility: provide deprecated resample constants for MoviePy ---
+# Google libraries
 try:
-    from PIL import Image as _PIL_Image
-    if not hasattr(_PIL_Image, "ANTIALIAS"):
-        from PIL import Image
-        Image.ANTIALIAS = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
-        Image.BICUBIC = Image.Resampling.BICUBIC    # type: ignore[attr-defined]
-        Image.BILINEAR = Image.Resampling.BILINEAR  # type: ignore[attr-defined]
-except Exception:
-    pass
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    from googleapiclient.http import MediaFileUpload
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from google_auth_oauthlib.flow import InstalledAppFlow
+except Exception as e:
+    print("[uploader] Missing Google API packages. Install: \n  pip install google-api-python-client google-auth google-auth-oauthlib", file=sys.stderr)
+    raise
 
-# Lazy MoviePy import so we can print early diagnostics before heavy imports
-VideoFileClip = AudioFileClip = concatenate_videoclips = ColorClip = concatenate_audioclips = None  # filled by ensure_moviepy()
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube",
+]
 
-def ensure_moviepy():
-    global VideoFileClip, AudioFileClip, concatenate_videoclips, ColorClip, concatenate_audioclips
-    if VideoFileClip is None:
-        print("[assemble] Loading MoviePy …", flush=True)
-        from moviepy.editor import (
-            VideoFileClip as _V, AudioFileClip as _A, concatenate_videoclips as _CV,
-            ColorClip as _Col, concatenate_audioclips as _CA
-        )
-        VideoFileClip, AudioFileClip, concatenate_videoclips, ColorClip, concatenate_audioclips = _V, _A, _CV, _Col, _CA
-        print("[assemble] MoviePy loaded", flush=True)
+DEFAULT_CLIENT = pathlib.Path("config/client_secret.json")
+DEFAULT_TOKENS = pathlib.Path("config/tokens.json")
 
-
-def latest_broll_dir(root: pathlib.Path) -> pathlib.Path | None:
-    candidates = [p for p in root.glob("*") if p.is_dir()]
-    if not candidates:
-        return None
-    # try to sort by YYYY-MM-DD name; else by mtime
-    def key(p: pathlib.Path):
-        try:
-            from datetime import datetime
-            return datetime.strptime(p.name, "%Y-%m-%d")
-        except Exception:
-            return p.stat().st_mtime
-    return max(candidates, key=key)
-
-
-def is_uhd_filename(name: str) -> bool:
-    n = name.lower()
-    return any(tok in n for tok in ["3840_2160", "4096_", "uhd"])  # simple heuristic
+CATEGORY_MAP = {
+    # YouTube categoryId mapping (EN)
+    "film & animation": 1,
+    "autos & vehicles": 2,
+    "music": 10,
+    "pets & animals": 15,
+    "sports": 17,
+    "short movies": 18,
+    "travel & events": 19,
+    "gaming": 20,
+    "people & blogs": 22,
+    "comedy": 23,
+    "entertainment": 24,
+    "news & politics": 25,
+    "howto & style": 26,
+    "education": 27,
+    "science & technology": 28,
+    "nonprofits & activism": 29,
+}
 
 
-def build_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Assemble a scenic montage from downloaded b-roll")
-    p.add_argument("--broll-dir", type=pathlib.Path, default=None,
-                   help="Folder with mp4 clips (default: latest under content/assets/broll)")
-    p.add_argument("--output", type=pathlib.Path, default=pathlib.Path("content/uploads/scenic_montage_001.mp4"))
-    p.add_argument("--target-seconds", type=int, default=90, help="Target montage length in seconds")
-    p.add_argument("--min-clip-seconds", type=float, default=5.0)
-    p.add_argument("--max-clip-seconds", type=float, default=8.0)
-    p.add_argument("--max-clips", type=int, default=20, help="Upper bound on clips to concatenate")
-    p.add_argument("--max-height", type=int, default=1080, help="Resize each subclip to this height (reduces memory)")
-    p.add_argument("--fps", type=int, default=30, help="Output frames per second")
-    p.add_argument("--threads", type=int, default=2, help="FFmpeg threads for writing")
-
-    # Music options
-    p.add_argument("--music", dest="music_dir", type=pathlib.Path, default=pathlib.Path("content/assets/music"),
-                   help="Folder with music files (mp3/wav/m4a/flac). If empty, video will be silent.")
-    p.add_argument("--music-volume", type=float, default=0.15, help="Music gain multiplier (0.0–1.0). Default 0.15")
-    p.add_argument("--music-fade", type=float, default=1.5, help="Fade in/out seconds for soundtrack")
-    p.add_argument("--music-crossfade", type=float, default=1.0, help="Crossfade seconds when looping track")
-    p.add_argument("--no-music", action="store_true", help="Disable soundtrack even if files exist")
-
-    p.add_argument("--logger", choices=["bar", "verbose", "none"], default="bar", help="Progress logger: bar|verbose|none")
-    p.add_argument("--scan-limit", type=int, default=40, help="Max number of files to probe before we have enough clips")
-    g = p.add_mutually_exclusive_group()
-    g.add_argument("--skip-uhd", dest="skip_uhd", action="store_true", help="Skip 4K/uhd files by filename (default)")
-    g.add_argument("--include-uhd", dest="skip_uhd", action="store_false", help="Allow 4K/uhd files in the scan")
-    p.set_defaults(skip_uhd=True)
-    p.add_argument("--selftest", action="store_true", help="Generate small synthetic clips and run pipeline")
-    p.add_argument("--dry-run", action="store_true", help="List candidate files and exit (no MoviePy)")
-    p.add_argument("--diagnose", action="store_true", help="Print environment and ffmpeg info then continue")
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Upload a video to YouTube with optional thumbnail and metadata")
+    p.add_argument("--video", required=True, help="Path to the MP4 (or MOV/MKV…) video")
+    p.add_argument("--thumbnail", help="Path to a JPG/PNG to use as custom thumbnail")
+    p.add_argument("--metadata", help="Path to metadata JSON (title/description/tags/categoryId/language)")
+    p.add_argument("--title", help="Override title")
+    p.add_argument("--description", help="Override description")
+    p.add_argument("--tags", help="Comma-separated tags override/addition")
+    p.add_argument("--category", help="Category name or numeric ID (default: travel & events)")
+    p.add_argument("--language", default="en", help="Default language code")
+    p.add_argument("--privacy", choices=["public","private","unlisted"], default="unlisted")
+    p.add_argument("--publish-at", dest="publish_at", help="RFC3339 time for scheduled publish (requires privacy=private)")
+    p.add_argument("--client-secret", type=pathlib.Path, default=DEFAULT_CLIENT)
+    p.add_argument("--tokens", type=pathlib.Path, default=DEFAULT_TOKENS)
+    p.add_argument("--dry-run", action="store_true", help="Print request and exit")
     return p.parse_args()
 
 
-def list_music_files(music_dir: pathlib.Path) -> List[pathlib.Path]:
-    if not music_dir or not music_dir.exists():
-        return []
-    exts = ("*.mp3", "*.wav", "*.m4a", "*.flac", "*.aac")
-    files: List[pathlib.Path] = []
-    for pat in exts:
-        files.extend(music_dir.glob(pat))
-    return files
-
-
-def build_soundtrack(duration: float, args) :
-    """Return an AudioClip matching duration, or None if no music available.
-    Strategy: pick one random file; if longer → random trim; if shorter → loop with crossfades.
-    """
-    ensure_moviepy()
-    files = list_music_files(args.music_dir)
-    if args.no_music or not files:
-        return None
-    src = random.choice(files)
+def load_metadata(path: str | None) -> Dict[str, Any]:
+    if not path:
+        return {}
     try:
-        base = AudioFileClip(str(src))
-        fade = max(0.0, float(args.music_fade))
-        xfade = max(0.0, float(args.music_crossfade))
-        vol = max(0.0, float(args.music_volume))
-
-        if base.duration >= duration + 0.25:
-            # Trim a random segment
-            start = random.uniform(0, max(0.0, base.duration - duration - 0.25))
-            song = base.subclip(start, start + duration)
-        else:
-            # Loop with crossfades
-            pieces = []
-            t = 0.0
-            while t < duration + 0.1:
-                # small overhang to allow crossfade
-                end = min(base.duration, duration - t + xfade)
-                part = base.subclip(0, end)
-                if pieces and xfade > 0:
-                    # fade last piece out and overlap with next
-                    last = pieces[-1].audio_fadeout(xfade)
-                    pieces[-1] = last
-                pieces.append(part)
-                t += (end - (xfade if xfade > 0 else 0))
-            song = concatenate_audioclips(pieces).subclip(0, duration)
-
-        if fade > 0:
-            song = song.audio_fadein(fade).audio_fadeout(fade)
-        if vol != 1.0:
-            song = song.volumex(vol)
-        return song
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception as e:
-        print("[assemble] Music load error:", src.name, "=>", e, flush=True)
-        return None
+        print(f"[uploader] Warning: metadata load failed for {path}: {e}")
+        return {}
 
 
-def safe_subclip(path: str, args: argparse.Namespace):
-    ensure_moviepy()
-    clip = None
-    try:
-        clip = VideoFileClip(path, audio=False)
-        dur = float(getattr(clip, "duration", 0) or 0)
-        if dur < args.min_clip_seconds + 0.5:
-            return None
-        start = random.uniform(0, max(0.0, dur - args.max_clip_seconds - 0.1))
-        end = min(dur, start + random.uniform(args.min_clip_seconds, args.max_clip_seconds))
-        sub = clip.subclip(start, end)
-        if args.max_height and getattr(sub, "h", 0) > args.max_height:
-            sub = sub.resize(height=args.max_height)
-        return sub
-    except Exception as e:
-        print("  ↳ Skip:", os.path.basename(path), "=>", e, flush=True)
+def coalesce_title(md: Dict[str, Any], override: str | None) -> str:
+    if override:
+        return override
+    for k in ("title_en", "title", "Title"):
+        v = md.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return pathlib.Path(md.get("video_path", "untitled.mp4")).stem.replace("_", " ").title()
+
+
+def parse_tags(md: Dict[str, Any], override: str | None) -> List[str]:
+    tags: List[str] = []
+    md_tags = md.get("tags")
+    if isinstance(md_tags, list):
+        tags.extend([str(t) for t in md_tags if str(t).strip()])
+    if override:
+        tags.extend([t.strip() for t in override.split(",") if t.strip()])
+    # de-dupe, keep order
+    seen = set()
+    out = []
+    for t in tags:
+        if t.lower() in seen:
+            continue
+        seen.add(t.lower())
+        out.append(t)
+    return out[:500]
+
+
+def category_to_id(cat: str | None) -> int:
+    if not cat:
+        return 19  # Travel & Events default for scenic/kitesurf
+    cat = str(cat).strip()
+    if cat.isdigit():
+        return int(cat)
+    return CATEGORY_MAP.get(cat.lower(), 19)
+
+
+def load_credentials(client_path: pathlib.Path, tokens_path: pathlib.Path) -> Credentials:
+    creds: Credentials | None = None
+    if tokens_path.exists():
         try:
-            if clip is not None:
-                clip.reader.close()
-                if getattr(clip, "audio", None):
-                    clip.audio.reader.close_proc()
+            creds = Credentials.from_authorized_user_file(str(tokens_path), SCOPES)
+        except Exception:
+            creds = None
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not client_path.exists():
+                raise FileNotFoundError(f"Client secrets not found at {client_path}. Create an OAuth client (Desktop) and save JSON.")
+            flow = InstalledAppFlow.from_client_secrets_file(str(client_path), SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for next time
+        tokens_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tokens_path, "w", encoding="utf-8") as f:
+            f.write(creds.to_json())
+    return creds
+
+
+def upload_video(youtube, video_path: str, body: Dict[str, Any]) -> str:
+    media = MediaFileUpload(video_path, chunksize=8 * 1024 * 1024, resumable=True)
+    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+    print("[uploader] Starting resumable upload…")
+    response = None
+    retry = 0
+    while response is None:
+        try:
+            status, response = request.next_chunk()
+            if status and hasattr(status, 'progress'):  # v1 style
+                print(f"  progress: {int(status.progress() * 100)}%", flush=True)
+            elif status and hasattr(status, 'resumable_progress'):  # v2 style
+                # best-effort display
+                print(f"  sent bytes: {getattr(status, 'resumable_progress', 0)}", flush=True)
+        except HttpError as e:
+            retry += 1
+            if retry > 5:
+                raise
+            wait = min(2 ** retry, 30)
+            print(f"[uploader] HttpError {e.status_code}; retrying in {wait}s… {e}")
+            time.sleep(wait)
+    video_id = response["id"]
+    print("[uploader] Uploaded videoId:", video_id)
+    return video_id
+
+
+def set_thumbnail(youtube, video_id: str, path: str):
+    if not path or not os.path.exists(path):
+        print("[uploader] Thumbnail not found; skipping:", path)
+        return
+    try:
+        media = MediaFileUpload(path, mimetype="image/jpeg")
+        youtube.thumbnails().set(videoId=video_id, media_body=media).execute()
+        print("[uploader] Thumbnail set ✔")
+    except HttpError as e:
+        print("[uploader] API error while setting thumbnail:", e)
+        try:
+            print(getattr(e, 'error_details', e.content))
         except Exception:
             pass
-        return None
-
-
-def write_video(selected, args: argparse.Namespace):
-    ensure_moviepy()
-    total_dur = sum(float(c.duration or 0) for c in selected)
-    print(f"[assemble] Concatenating {len(selected)} clips (~{total_dur:.1f}s)…", flush=True)
-    t0 = time.time()
-    video = concatenate_videoclips(selected, method="compose")
-    print(f"[assemble] Concatenated in {time.time()-t0:.1f}s. Writing to {args.output} …", flush=True)
-
-    # Optional music soundtrack
-    music_clip = None
-    try:
-        music_clip = build_soundtrack(video.duration, args)
-        if music_clip is not None:
-            video = video.set_audio(music_clip.set_duration(video.duration))
-            print("[assemble] Added soundtrack:", args.music_dir, flush=True)
-        else:
-            print("[assemble] No soundtrack added (none found or disabled).", flush=True)
-    except Exception as e:
-        print("[assemble] Soundtrack error:", e, flush=True)
-
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    logger = None if args.logger == "none" else args.logger
-    video.write_videofile(
-        str(args.output),
-        codec="libx264",
-        audio_codec="aac",
-        fps=args.fps,
-        threads=max(1, int(args.threads)),
-        preset="veryfast",
-        remove_temp=True,
-        ffmpeg_params=["-movflags", "faststart"],
-        logger=logger,
-    )
-    print("[assemble] Saved", args.output, flush=True)
-
-
-def selftest_run():
-    ensure_moviepy()
-    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="assemble_selftest_"))
-    try:
-        colors = [(255, 80, 80), (80, 255, 80), (80, 80, 255)]
-        srcs = []
-        for i, col in enumerate(colors, 1):
-            clip = ColorClip(size=(640, 360), color=col, duration=2).set_fps(24)
-            p = tmpdir / f"test_{i}.mp4"
-            clip.write_videofile(str(p), codec="libx264", audio=False, fps=24, preset="ultrafast", threads=1, logger=None)
-            srcs.append(str(p))
-            clip.close()
-        class DummyArgs:
-            min_clip_seconds = 1.0
-            max_clip_seconds = 1.5
-            max_height = 480
-            fps = 24
-            threads = 1
-            music_dir = pathlib.Path("./no_music")
-            music_volume = 0.2
-            music_fade = 0.5
-            music_crossfade = 0.3
-            no_music = False
-            output = tmpdir / "out.mp4"
-            logger = "bar"
-        args = DummyArgs()
-        selected = []
-        for s in srcs:
-            sc = safe_subclip(s, args)
-            if sc:
-                selected.append(sc)
-        if not selected:
-            raise SystemExit("selftest: no subclips")
-        write_video(selected, args)
-        for c in selected:
-            c.close()
-        print("[selftest] OK =>", args.output)
-    finally:
-        pass
 
 
 def main():
-    args = build_args()
+    args = parse_args()
 
-    # Startup banner before any heavy imports
-    print(VERSION, flush=True)
-    print(f"[assemble] Python: {sys.version.splitlines()[0]}", flush=True)
-    print(f"[assemble] CWD: {os.getcwd()}", flush=True)
+    md = load_metadata(args.metadata)
 
-    if args.diagnose:
-        try:
-            import imageio_ffmpeg
-            print(f"[assemble] ffmpeg: {imageio_ffmpeg.get_ffmpeg_exe()}", flush=True)
-        except Exception as e:
-            print(f"[assemble] ffmpeg path detection error: {e}", flush=True)
+    title = coalesce_title(md, args.title)
+    description = args.description if args.description is not None else md.get("description", "")
+    tags = parse_tags(md, args.tags)
+    categoryId = category_to_id(args.category or str(md.get("categoryId") or ""))
+    defaultLanguage = args.language or md.get("defaultLanguage") or "en"
 
-    broll_root = pathlib.Path("content/assets/broll")
-    broll_dir = args.broll_dir or latest_broll_dir(broll_root)
-    print(f"[assemble] broll_dir: {broll_dir}", flush=True)
+    snippet = {
+        "title": title,
+        "description": description,
+        "tags": tags,
+        "categoryId": categoryId,
+        "defaultLanguage": defaultLanguage,
+    }
+    status = {"privacyStatus": args.privacy}
+    if args.publish_at:
+        # scheduled publish must be private + RFC3339 time
+        status["publishAt"] = args.publish_at
+        if status["privacyStatus"] != "private":
+            print("[uploader] For scheduled publish, privacy must be 'private'. Overriding.")
+            status["privacyStatus"] = "private"
 
-    if not broll_dir or not broll_dir.exists():
-        raise SystemExit("No b-roll directory found. Run scripts/fetch_assets.py first.")
+    body = {"snippet": snippet, "status": status}
 
-    mp4s = sorted(glob.glob(str(broll_dir / "*.mp4")))
-    print(f"[assemble] found {len(mp4s)} mp4 files", flush=True)
-    if not mp4s:
-        raise SystemExit(f"No mp4 files found in {broll_dir}")
-
-    # Filter out UHD unless overridden
-    filtered = [p for p in mp4s if (not args.skip_uhd) or (not is_uhd_filename(os.path.basename(p)))]
-    if not filtered:
-        filtered = mp4s  # fall back if our heuristic removed everything
+    print("[uploader] Request body:")
+    print(json.dumps(body, indent=2, ensure_ascii=False))
 
     if args.dry_run:
-        print("[assemble] DRY RUN — first 20 files:")
-        for i, p in enumerate(filtered[:20], 1):
-            print(f"  {i:02d}. {os.path.basename(p)}")
-        return
+        print("[uploader] Dry-run: not uploading.")
+        return 0
 
-    random.shuffle(filtered)
+    creds = load_credentials(args.client_secret, args.tokens)
+    youtube = build("youtube", "v3", credentials=creds, static_discovery=False)
 
-    scan_total = min(args.scan_limit, len(filtered))
-    print(f"[assemble] Scanning up to {scan_total} of {len(filtered)} files in {broll_dir} …", flush=True)
+    video_id = upload_video(youtube, args.video, body)
 
-    selected = []
-    total = 0.0
-    scanned = 0
-    for path in filtered:
-        if scanned >= args.scan_limit:
-            print("[assemble] Reached scan limit; proceeding with what we have…", flush=True)
-            break
-        if len(selected) >= args.max_clips or total >= args.target_seconds:
-            break
-        scanned += 1
-        print(f"[assemble] [{scanned}/{scan_total}] Probing: {os.path.basename(path)}", flush=True)
-        sub = safe_subclip(path, args)
-        if sub is None:
-            continue
-        selected.append(sub)
-        total += float(sub.duration or 0)
+    if args.thumbnail:
+        set_thumbnail(youtube, video_id, args.thumbnail)
 
-    if not selected:
-        raise SystemExit("No suitable clips to assemble.")
-
-    try:
-        write_video(selected, args)
-    finally:
-        # Close all subclips to free memory
-        for c in selected:
-            try:
-                c.close()
-            except Exception:
-                pass
+    print(f"[uploader] Done. Watch: https://youtu.be/{video_id}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
