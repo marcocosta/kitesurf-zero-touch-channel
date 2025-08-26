@@ -38,18 +38,80 @@ except Exception:
     pass
 
 # Lazy MoviePy import so we can print early diagnostics
-VideoFileClip = AudioFileClip = concatenate_videoclips = ColorClip = concatenate_audioclips = None  # set by ensure_moviepy()
+VideoFileClip = AudioFileClip = concatenate_videoclips = ColorClip = None
+concatenate_audioclips = None
+CompositeAudioClip = None
+audio_loop_fx = None  # moviepy 2.x effect
 
 def ensure_moviepy():
-    global VideoFileClip, AudioFileClip, concatenate_videoclips, ColorClip, concatenate_audioclips
-    if VideoFileClip is None:
-        print("[assemble] Loading MoviePy …", flush=True)
+    """
+    Support both MoviePy 1.x (editor facade) and 2.x (modular paths).
+    """
+    global VideoFileClip, AudioFileClip, concatenate_videoclips, ColorClip
+    global concatenate_audioclips, CompositeAudioClip, audio_loop_fx
+
+    if VideoFileClip is not None:
+        return
+
+    print("[assemble] Loading MoviePy …", flush=True)
+
+    # Try legacy facade first (MoviePy 1.x)
+    try:
         from moviepy.editor import (
-            VideoFileClip as _V, AudioFileClip as _A, concatenate_videoclips as _CV,
-            ColorClip as _Col, concatenate_audioclips as _CA
+            VideoFileClip as _V,
+            AudioFileClip as _A,
+            concatenate_videoclips as _CV,
+            ColorClip as _Col,
+            concatenate_audioclips as _CA,
+            CompositeAudioClip as _Comp,
         )
-        VideoFileClip, AudioFileClip, concatenate_videoclips, ColorClip, concatenate_audioclips = _V, _A, _CV, _Col, _CA
-        print("[assemble] MoviePy loaded", flush=True)
+        VideoFileClip, AudioFileClip = _V, _A
+        concatenate_videoclips, ColorClip = _CV, _Col
+        concatenate_audioclips = _CA
+        CompositeAudioClip = _Comp
+        try:
+            from moviepy.audio.fx.all import audio_loop as _AL
+            audio_loop_fx = _AL
+        except Exception:
+            audio_loop_fx = None
+        print("[assemble] MoviePy loaded (v1.x editor)", flush=True)
+        return
+    except Exception:
+        pass
+
+    # MoviePy 2.x modular imports
+    try:
+        from moviepy.video.io.VideoFileClip import VideoFileClip as _V
+        from moviepy.audio.io.AudioFileClip import AudioFileClip as _A
+        from moviepy.video.compositing.concatenate import concatenate_videoclips as _CV
+        from moviepy.video.VideoClip import ColorClip as _Col
+        try:
+            from moviepy.audio.compositing.concatenate import concatenate_audioclips as _CA
+        except Exception:
+            _CA = None
+        try:
+            from moviepy.audio.compositing.CompositeAudioClip import CompositeAudioClip as _Comp
+        except Exception:
+            try:
+                from moviepy.audio.AudioClip import CompositeAudioClip as _Comp  # alt path
+            except Exception:
+                _Comp = None
+        try:
+            from moviepy.audio.fx.all import audio_loop as _AL
+        except Exception:
+            _AL = None
+
+        VideoFileClip, AudioFileClip = _V, _A
+        concatenate_videoclips, ColorClip = _CV, _Col
+        concatenate_audioclips = _CA
+        CompositeAudioClip = _Comp
+        audio_loop_fx = _AL
+        print("[assemble] MoviePy loaded (v2.x modular)", flush=True)
+        return
+    except Exception as e:
+        print("[assemble] FATAL: cannot import MoviePy primitives:", e, flush=True)
+        raise
+
 
 
 # ------------------------------ CLI ------------------------------------- #
@@ -150,17 +212,34 @@ def build_soundtrack(duration: float, args):
             start = random.uniform(0, max(0.0, base.duration - duration - 0.25))
             song = base.subclip(start, start + duration)
         else:
-            pieces = []
-            t = 0.0
-            while t < duration + 0.1:
-                end = min(base.duration, duration - t + xfade)
-                part = base.subclip(0, end)
-                if pieces and xfade > 0:
-                    last = pieces[-1].audio_fadeout(xfade)
-                    pieces[-1] = last
-                pieces.append(part)
-                t += (end - (xfade if xfade > 0 else 0))
-            song = concatenate_audioclips(pieces).subclip(0, duration)
+            # Prefer a clean loop via v2.x audio_loop if available
+            if audio_loop_fx is not None:
+                song = base.fx(audio_loop_fx, duration=duration)
+            elif concatenate_audioclips is not None:
+                # Fallback: manual concatenation with crossfades
+                pieces = []
+                t = 0.0
+                while t < duration + 0.1:
+                    end = min(base.duration, duration - t + xfade)
+                    part = base.subclip(0, end)
+                    if pieces and xfade > 0:
+                        last = pieces[-1].audio_fadeout(xfade)
+                        pieces[-1] = last
+                    pieces.append(part)
+                    t += (end - (xfade if xfade > 0 else 0))
+                song = concatenate_audioclips(pieces).subclip(0, duration)
+            elif CompositeAudioClip is not None:
+                # Last-resort: tile copies back-to-back without crossfade
+                copies = []
+                t = 0.0
+                while t < duration + 0.1:
+                    copies.append(base.set_start(t))
+                    t += max(0.1, base.duration - 0.01)
+                song = CompositeAudioClip(copies).set_duration(duration)
+            else:
+                # Absolute fallback: trim as-is (may be shorter than target)
+                song = base.subclip(0, min(base.duration, duration))
+
 
         if fade > 0:
             song = song.audio_fadein(fade).audio_fadeout(fade)
