@@ -100,6 +100,16 @@ def ensure_moviepy():
 
 # ---------- small cross-version helpers ----------
 
+def subclip_safe(clip, start, end):
+    """v1: .subclip(); v2: .subclipped()"""
+    try:
+        return clip.subclip(start, end)          # v1.x
+    except Exception:
+        try:
+            return clip.subclipped(start, end)   # v2.x
+        except Exception as e:
+            raise AttributeError("No subclip/subclipped on clip") from e
+
 def set_audio_safe(video, audio):
     try:
         return video.set_audio(audio)           # v1
@@ -173,7 +183,7 @@ def loop_audio_safe(base, duration: float, crossfade: float):
     t = 0.0
     while t < duration + 0.1:
         end = min(base.duration, duration - t + max(0.0, crossfade))
-        part = base.subclip(0, end)
+        part = subclip_safe(base, 0, end)
         if pieces and crossfade > 0:
             pieces[-1] = pieces[-1].audio_fadeout(crossfade)
         pieces.append(part)
@@ -187,7 +197,7 @@ def loop_audio_safe(base, duration: float, crossfade: float):
             acc.append(base.set_start(t))
             t += max(0.1, base.duration - 0.01)
         return CompositeAudioClip(acc).set_duration(duration)
-    return base.subclip(0, min(base.duration, duration))
+    return subclip_safe(base, 0, min(base.duration, duration))
 
 # -------------- CLI & utilities --------------
 
@@ -261,14 +271,10 @@ def build_soundtrack(duration: float, args):
         # trim or loop
         if base.duration >= duration + 0.25:
             start = random.uniform(0, max(0.0, base.duration - duration - 0.25))
-            song = base.subclip(start, start + duration)
+            song = subclip_safe(base, start, start + duration)
         else:
             song = loop_audio_safe(base, duration, xfade)
 
-        song = fade_audio_safe(song, fade)
-        if vol != 1.0:
-            song = apply_volume(song, vol)
-        return song
     except Exception as e:
         print("[assemble] Music load error:", src.name, "=>", e, flush=True)
         return None
@@ -290,6 +296,7 @@ def clip_has_audio_stream(path: str) -> bool:
 def _db_to_lin(db: float) -> float:
     return 10 ** (-float(db) / 20.0)
 
+
 def safe_subclip(path: str, args):
     ensure_moviepy()
     clip = None
@@ -301,7 +308,7 @@ def safe_subclip(path: str, args):
         start_max = max(0.0, dur - args.max_clip_seconds - 0.1)
         start = random.uniform(0, start_max)
         end   = min(dur, start + random.uniform(args.min_clip_seconds, args.max_clip_seconds))
-        sub = clip.subclip(start, end)
+        sub = subclip_safe(clip, start, end)
         if args.max_height and getattr(sub, "h", 0) > args.max_height:
             sub = resize_safe(sub, args.max_height)
         return sub
@@ -315,6 +322,7 @@ def safe_subclip(path: str, args):
         except Exception:
             pass
         return None
+
 
 def write_video(selected, args, duck_intervals: List[Tuple[float,float]]):
     ensure_moviepy()
