@@ -100,6 +100,28 @@ def ensure_moviepy():
 
 # ---------- small cross-version helpers ----------
 
+def make_logger(kind: str):
+    """
+    Return a proglog logger object (v2) or None. Works fine on v1 too.
+    kind: 'bar' | 'verbose' | 'none'
+    """
+    if not kind or kind == "none":
+        return None
+    try:
+        # Prefer tqdm-style bar if available
+        from proglog import TqdmProgressBarLogger, ProgressBarLogger
+        if kind == "bar":
+            try:
+                return TqdmProgressBarLogger()
+            except Exception:
+                return ProgressBarLogger()
+        # 'verbose' -> simple progress logger (still shows progress)
+        return ProgressBarLogger()
+    except Exception:
+        # If proglog missing, just disable progress (avoid passing a string to v2)
+        return None
+
+
 def subclip_safe(clip, start, end):
     """v1: .subclip(); v2: .subclipped()"""
     try:
@@ -362,7 +384,7 @@ def write_video(selected, args, duck_intervals: List[Tuple[float,float]]):
         print("[assemble] Soundtrack error:", e, flush=True)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    logger = None if args.logger == "none" else args.logger
+    logger = make_logger(args.logger)
     video.write_videofile(
         str(args.output),
         codec="libx264",
@@ -374,6 +396,7 @@ def write_video(selected, args, duck_intervals: List[Tuple[float,float]]):
         ffmpeg_params=["-movflags", "faststart"],
         logger=logger,
     )
+
     print("[assemble] Saved", args.output, flush=True)
 
 # -------------- main --------------
